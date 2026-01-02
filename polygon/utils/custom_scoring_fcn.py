@@ -345,22 +345,22 @@ class LigandSets_truel(MoleculewiseScoringFunction):
         for fps in self.fp1:
             tani1 = TanimotoSimilarity(fp, fps)
             if( tani1 > maxs1):
-                maxs1 = tani
+                maxs1 = tani1
 
         maxs2 = 0
         for fps in self.fp2:
             tani2 = TanimotoSimilarity(fp, fps)
             if( tani2 > maxs2):
-                maxs2 = tani
+                maxs2 = tani2
 
         maxs3 = 0
         for fps in self.fp3:
             tani3 = TanimotoSimilarity(fp, fps)
             if( tani3 > maxs3):
-                maxs3 = tani
+                maxs3 = tani3
 
         tani = np.minimum(maxs1, maxs2)
-        tani = np.minimum(max3,  tani)
+        tani = np.minimum(maxs3,  tani)
 
         return np.minimum(tani, self.threshold)/self.threshold
 

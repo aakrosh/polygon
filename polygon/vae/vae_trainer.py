@@ -237,7 +237,7 @@ class VAETrainer(ABC):
 
             # postfix = self._train_epoch(epoch,
             #                             tqdm_data, kl_weight, optimizer)
-            desc='Training   (epoch #{})'.format(str(epoch).zfill(len(str(n_epoch))))
+            desc = 'Training   (epoch #{})'.format(str(epoch).zfill(len(str(n_epoch))))
             postfix = self._train_epoch(epoch,
                             train_loader, kl_weight, optimizer, label=desc)
             if self.log_file is not None:

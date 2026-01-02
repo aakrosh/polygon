@@ -9,6 +9,7 @@ import logging
 import itertools
 import pickle
 import torch
+import argparse
 from collections import Counter, defaultdict
 from typing import Optional, List, Iterable, Collection, Tuple
 
@@ -264,7 +265,7 @@ def build_scoring_function( scoring_definition,
                                                             sigma=row.sigma,
                                                             minimize=row.minimize)
             elif opti == "linear":
-                cell_line_modifier = ThresholdedLinearModifier_min(threshold=row.mu)
+                cell_line_modifier = ThresholdedLinearModifier(threshold=row.mu)
 
             scorers[name] = CellLine(cell_encodings,
                                         score_modifier = cell_line_modifier,
