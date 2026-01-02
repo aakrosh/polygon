@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "polygon"
+dynamic = ["version"]
+description = "VAE base reinforcement learning molecular generator"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Brenton Munson", email = "bpmunson@ucsd.edu"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "pandas>=1.3.0",      # Updated for on_bad_lines parameter
+    "numpy>=1.18.1",
+    "rdkit>=2022.9.1,<2025",  # rdkit 2025+ requires Python 3.10+
+    "torch>=1.4.0",
+    "joblib>=0.14.1",
+    "scikit-learn>=0.22.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+polygon = "polygon.run:main"
+
+[project.urls]
+Homepage = "https://github.com/bpmunson/polygon"
+Repository = "https://github.com/bpmunson/polygon"
+
+[tool.hatch.version]
+path = "polygon/version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["polygon"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

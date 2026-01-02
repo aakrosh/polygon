@@ -22,8 +22,7 @@ from rdkit.Chem import Descriptors
 from rdkit.DataStructs.cDataStructs import TanimotoSimilarity
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors, Mol
-from rdkit.six import iteritems
-#from rdkit.six.moves import cPickle
+# rdkit.six was removed in newer versions, use built-in
 import _pickle as cPickle
 from rdkit.Chem import Draw
 from rdkit.Chem.Draw import SimilarityMaps
@@ -413,7 +412,7 @@ class SAScorer(MoleculewiseScoringFunction):
         fps = fp.GetNonzeroElements()
         score1 = 0.
         nf = 0
-        for bitId, v in iteritems(fps):
+        for bitId, v in fps.items():
             nf += v
             sfp = bitId
             score1 += self.fscores.get(sfp, -4) * v
