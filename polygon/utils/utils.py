@@ -66,12 +66,18 @@ def load_model(model_class, model_definition, device, model_params=None, copy_to
         Args:
             model_class: class defintion of model to load
             model_definition: path to model pickle
-            device: cuda or cpu
+            device: cuda or cpu (string or torch.device object)
             copy_to_cpu: bool
 
         Returns: an VAE model
 
         """
+    # Convert torch.device to string if needed
+    if isinstance(device, torch.device):
+        device_str = str(device)
+    else:
+        device_str = device
+
     # load model, optionally with configuration
     if model_params:
         model = model_class(**model_params).to(device)
@@ -79,7 +85,7 @@ def load_model(model_class, model_definition, device, model_params=None, copy_to
         model = model_class().to(device)
 
     # load state dict
-    if "cpu" in device:
+    if "cpu" in device_str:
         model.load_state_dict(torch.load(model_definition, map_location="cpu"))
     else:
         model.load_state_dict(torch.load(model_definition))
