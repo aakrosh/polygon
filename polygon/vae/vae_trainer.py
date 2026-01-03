@@ -38,6 +38,11 @@ class VAETrainer(ABC):
         self.lr_n_mult = 1
         self.lr_end = 0.0003
 
+        # Delta-VAE and BoW parameters
+        self.delta_target = None  # If None, use standard KL; else use delta-VAE
+        self.lambda_bow = 0.0  # Weight for BoW loss (0 = disabled)
+        self.smiles_augmentation = False  # Enable SMILES augmentation
+
 
         # over ride deaults with kwargs
         self.__dict__.update(kwargs)
@@ -75,12 +80,41 @@ class VAETrainer(ABC):
         self.model = self.model.to(self.device)
 
 
+    def augment_smiles(self, smiles):
+        """Apply SMILES augmentation by randomizing SMILES representation
+
+        :param smiles: SMILES string
+        :return: augmented SMILES string (or original if augmentation fails)
+        """
+        if not self.smiles_augmentation:
+            return smiles
+
+        try:
+            from rdkit import Chem
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return smiles
+            # Generate random SMILES (different valid representation of same molecule)
+            augmented = Chem.MolToSmiles(mol, doRandom=True, canonical=False)
+            return augmented if augmented else smiles
+        except:
+            return smiles
+
     def get_dataloader(self, data, batch_size=None, collate_fn=None, shuffle=True):
         if batch_size is None:
             batch_size = self.n_batch
 
         if collate_fn is None:
-            collate_fn = self.model.get_collate_fn()
+            # Wrap collate function to apply augmentation
+            base_collate_fn = self.model.get_collate_fn()
+            if self.smiles_augmentation:
+                def augmented_collate_fn(data):
+                    # Apply augmentation to each SMILES
+                    augmented_data = [self.augment_smiles(smiles) for smiles in data]
+                    return base_collate_fn(augmented_data)
+                collate_fn = augmented_collate_fn
+            else:
+                collate_fn = base_collate_fn
 
         if self.n_workers > 0:
             worker_init_fn = set_torch_seed_to_all_gens
@@ -114,6 +148,7 @@ class VAETrainer(ABC):
 
         kl_loss_values = CircularBuffer(n_batches)
         recon_loss_values =  CircularBuffer(n_batches)
+        bow_loss_values = CircularBuffer(n_batches)
         loss_values =  CircularBuffer(n_batches)
 
 
@@ -124,9 +159,17 @@ class VAETrainer(ABC):
             #input_batch.to(self.device)
             #input_batch = tuple(data.to(self.model.device) for data in input_batch)
             # Forward
-            kl_loss, recon_loss = self.model(input_batch)
+            kl_loss, recon_loss, bow_loss = self.model(input_batch)
 
-            loss = kl_weight * kl_loss + recon_loss
+            # Apply delta-VAE if delta_target is set
+            # Standard delta-VAE: penalize only when KL exceeds target
+            if self.delta_target is not None:
+                kl_term = torch.clamp(kl_loss - self.delta_target, min=0.0)
+            else:
+                kl_term = kl_loss
+
+            # Combine losses
+            loss = kl_weight * kl_term + recon_loss + self.lambda_bow * bow_loss
 
             # Backward
             if optimizer is not None:
@@ -141,6 +184,7 @@ class VAETrainer(ABC):
 
             kl_loss_values.add(kl_loss.item())
             recon_loss_values.add(recon_loss.item())
+            bow_loss_values.add(bow_loss.item())
             loss_values.add(loss.item())
 
             lr = (optimizer.param_groups[0]['lr']
@@ -155,7 +199,8 @@ class VAETrainer(ABC):
                        f'Time={elapsed_time:.2f}',
                        f'loss={loss.sum():.5f}',
                        f'(kl={kl_loss.sum():.5f}',
-                       f'recon={recon_loss.sum():.5f})',
+                       f'recon={recon_loss.sum():.5f}',
+                       f'bow={bow_loss.sum():.5f})',
                        f'klw={kl_weight:.5f}',
                        f'lr={lr:.5f}']
 
@@ -166,13 +211,15 @@ class VAETrainer(ABC):
         elapsed_time = time.process_time() - epoch_start_time
         kl_loss_value = kl_loss_values.mean()
         recon_loss_value = recon_loss_values.mean()
+        bow_loss_value = bow_loss_values.mean()
         loss_value = loss_values.mean()
         postfix = [f'{label}',
                    #f'Batch {str(i).zfill(len(str(n_batches)))}/{n_batches}',
                    f'Time={elapsed_time:.2f}',
                    f'loss={loss_value:.5f}',
                    f'(kl={kl_loss_value:.5f}',
-                   f'recon={recon_loss_value:.5f})',
+                   f'recon={recon_loss_value:.5f}',
+                   f'bow={bow_loss_value:.5f})',
                    f'klw={kl_weight:.5f}',
                    f'lr={lr:.5f}']
         logging.info(' '.join([str(i) for i in postfix]))
@@ -183,6 +230,7 @@ class VAETrainer(ABC):
             'lr': lr,
             'kl_loss': kl_loss_value,
             'recon_loss': recon_loss_value,
+            'bow_loss': bow_loss_value,
             'loss': loss_value,
             'mode': 'Eval' if optimizer is None else 'Train'}
 
@@ -191,7 +239,7 @@ class VAETrainer(ABC):
     def _log_epoch(self, postfix, header=False):
         """ Write one epoch training results to log file
         """
-        columns = ['epoch','kl_weight','lr','kl_loss','recon_loss','loss','mode']
+        columns = ['epoch','kl_weight','lr','kl_loss','recon_loss','bow_loss','loss','mode']
 
 
         if self.log_file is None:

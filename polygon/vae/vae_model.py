@@ -97,6 +97,9 @@ class VAE(nn.Module):
         self.decoder_lat = nn.Linear(self.d_z, self.d_d_h)
         self.decoder_fc = nn.Linear(self.d_d_h, n_vocab)
 
+        # Bag-of-Words prediction head
+        self.bow_fc = nn.Linear(self.d_z, n_vocab)
+
         # Grouping the model's parameters
         self.encoder = nn.ModuleList([
             self.encoder_rnn,
@@ -111,7 +114,8 @@ class VAE(nn.Module):
         self.vae = nn.ModuleList([
             self.x_emb,
             self.encoder,
-            self.decoder
+            self.decoder,
+            self.bow_fc  # Add BoW head to parameter groups
         ])
 
     @property
@@ -154,6 +158,7 @@ class VAE(nn.Module):
         :param x: list of tensors of longs, input sentence x
         :return: float, kl term component of loss
         :return: float, recon component of loss
+        :return: float, bow component of loss
         """
 
         # Encoder: x -> z, kl_loss
@@ -161,9 +166,11 @@ class VAE(nn.Module):
 
         # Decoder: x, z -> recon_loss
         recon_loss = self.forward_decoder(x, z)
-        
 
-        return kl_loss, recon_loss
+        # BoW: x, z -> bow_loss
+        bow_loss = self.forward_bow(x, z)
+
+        return kl_loss, recon_loss, bow_loss
 
     def encode(self, x):
         """   
@@ -273,6 +280,39 @@ class VAE(nn.Module):
         if return_y:
             return recon_loss,y
         return recon_loss
+
+    def forward_bow(self, x, z):
+        """Bag-of-Words auxiliary loss
+
+        :param x: list of tensors of longs, input sentence x
+        :param z: (n_batch, d_z) of floats, latent vector z
+        :return: float, BoW component of loss
+        """
+        # Get BoW predictions from latent
+        bow_pred = self.bow_fc(z)
+
+        # Create target BoW representation (vectorized token counts)
+        n_vocab = bow_pred.size(-1)
+
+        # Pad sequences to uniform length
+        x_padded = nn.utils.rnn.pad_sequence(x, batch_first=True, padding_value=self.pad)
+
+        # Create mask for special tokens (exclude pad, bos, eos)
+        mask = (x_padded != self.pad) & (x_padded != self.bos) & (x_padded != self.eos)
+
+        # Create bag-of-words target (vectorized scatter_add)
+        bow_target = torch.zeros(len(x), n_vocab, device=self.device)
+        # Scatter add: for each token, increment its count in bow_target
+        # Only count tokens where mask is True
+        bow_target.scatter_add_(1, x_padded, mask.float())
+
+        # Normalize to sum to 1 (creates probability distribution)
+        bow_target = bow_target / (bow_target.sum(dim=1, keepdim=True) + 1e-8)
+
+        # MSE loss (better for count distributions than BCE)
+        bow_loss = F.mse_loss(bow_pred, bow_target, reduction='mean')
+
+        return bow_loss
 
     def sample_z_prior(self, n_batch):
         """Sampling z ~ p(z) = N(0, I)

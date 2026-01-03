@@ -345,6 +345,15 @@ def train_parser(parser):
     train_arg.add_argument('--n_workers',
                            type=int, default=0,
                            help='Number of workers for DataLoaders')
+    train_arg.add_argument('--delta_target',
+                           type=float, default=None,
+                           help='Target KL divergence for delta-VAE (if None, use standard VAE)')
+    train_arg.add_argument('--lambda_bow',
+                           type=float, default=0.0,
+                           help='Weight for bag-of-words auxiliary loss (0 = disabled)')
+    train_arg.add_argument('--smiles_augmentation',
+                           action='store_true', default=False,
+                           help='Enable SMILES augmentation (randomize SMILES representations)')
 
 
     model_arg = sub_parser.add_argument_group('Model Arguments')
