@@ -324,6 +324,8 @@ def main():
                        help='Device to use (cpu or cuda:0)')
     parser.add_argument('--output', type=str, default='model_assessment.txt',
                        help='Output file for assessment results')
+    parser.add_argument('--output_json', type=str, default=None,
+                       help='Output file for JSON format results (for automated parsing)')
     parser.add_argument('--save_samples', action='store_true',
                        help='Save generated SMILES to file')
 
@@ -437,6 +439,24 @@ def main():
             f.write(f"  Generated: {stats['gen_mean']:.2f} ± {stats['gen_std']:.2f}\n")
 
     print(f"Assessment complete! Results saved to {args.output}")
+
+    # Save JSON output if requested
+    if args.output_json:
+        import json
+        json_data = {
+            'validity': validity_results['validity'],
+            'uniqueness': uniqueness_results['uniqueness'],
+            'novelty': novelty_results['novelty'],
+            'diversity': diversity_results['avg_tanimoto_distance'],
+            'reconstruction_rate': recon_results['reconstruction_rate'],
+            'n_generated': len(generated_smiles),
+            'n_valid': len(validity_results['valid_smiles']),
+            'property_stats': prop_stats
+        }
+        with open(args.output_json, 'w') as f:
+            json.dump(json_data, f, indent=2)
+        print(f"JSON results saved to {args.output_json}")
+
     print("\nQUICK INTERPRETATION GUIDE:")
     print("- Validity should be >95% for a good model")
     print("- Uniqueness should be >80%")
