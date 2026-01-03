@@ -41,6 +41,11 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.0",
 ]
+viz = [
+    "plotly>=5.0.0",
+    "matplotlib>=3.3.0",
+    "seaborn>=0.11.0",
+]
 
 [project.scripts]
 polygon = "polygon.run:main"
