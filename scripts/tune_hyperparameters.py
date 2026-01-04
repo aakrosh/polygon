@@ -24,19 +24,32 @@ def get_available_devices(n_jobs):
     """Get list of available devices for parallel trials.
 
     Returns a list of device strings (e.g., ['cuda:0', 'cuda:1', 'cpu']).
+    Limits to one trial per GPU to prevent memory contention.
     """
     if not torch.cuda.is_available():
+        print(f"CUDA not available, using CPU for all {n_jobs} workers")
         return ['cpu'] * n_jobs
 
     n_gpus = torch.cuda.device_count()
-    if n_gpus == 0:
-        return ['cpu'] * n_jobs
 
-    # Distribute trials across available GPUs
+    # CRITICAL: Limit to one trial per GPU to prevent OOM
+    if n_jobs > n_gpus:
+        print(f"\nWARNING: n_jobs ({n_jobs}) > available GPUs ({n_gpus})")
+        print(f"Reducing n_jobs to {n_gpus} to prevent GPU memory contention")
+        print(f"Each VAE training can use 4-10GB GPU memory with batch_size=1024")
+        n_jobs = n_gpus
+
+    # Create device list with memory info
     devices = []
+    print("\nGPU Memory Available:")
     for i in range(n_jobs):
-        gpu_id = i % n_gpus
-        devices.append(f'cuda:{gpu_id}')
+        devices.append(f'cuda:{i}')
+        try:
+            props = torch.cuda.get_device_properties(i)
+            total_gb = props.total_memory / 1024**3
+            print(f"  cuda:{i}: {props.name} ({total_gb:.1f} GB)")
+        except:
+            pass
 
     return devices
 
@@ -301,7 +314,27 @@ def objective(trial, args, train_data_subset, device=None):
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
 
         if result.returncode != 0:
-            print(f"Training failed: {result.stderr}")
+            # Categorize error type for better debugging
+            stderr_lower = result.stderr.lower()
+
+            if "out of memory" in stderr_lower or "cuda error" in stderr_lower:
+                error_type = "GPU_MEMORY"
+                trial.set_user_attr('failure_type', error_type)
+                print(f"GPU Memory Error in trial {trial.number}")
+                # Clear cache for next trial
+                if device.startswith('cuda'):
+                    torch.cuda.empty_cache()
+            elif "nan" in stderr_lower or "inf" in stderr_lower:
+                error_type = "NUMERICAL_INSTABILITY"
+                trial.set_user_attr('failure_type', error_type)
+                print(f"Numerical instability in trial {trial.number}")
+            else:
+                error_type = "UNKNOWN"
+                trial.set_user_attr('failure_type', error_type)
+
+            # Store truncated error for debugging
+            trial.set_user_attr('error_message', result.stderr[:500])
+            print(f"Training failed ({error_type}): {result.stderr[:200]}")
             raise optuna.exceptions.TrialPruned()
 
         # Assess the model
@@ -314,6 +347,10 @@ def objective(trial, args, train_data_subset, device=None):
         validity = metrics.get('validity', 0.0)
         reconstruction = metrics.get('reconstruction_rate', 0.0)
         uniqueness = metrics.get('uniqueness', 0.0)
+
+        # Clear GPU cache to prevent memory fragmentation
+        if device.startswith('cuda'):
+            torch.cuda.empty_cache()
 
         # Store metrics as user attributes
         trial.set_user_attr('validity', validity)
@@ -370,7 +407,16 @@ def main():
             direction='maximize',
             load_if_exists=True
         )
+        print(f"Using persistent storage: {args.storage}")
     else:
+        # Warn about in-memory storage with parallel trials
+        if args.n_jobs > 1:
+            print("\nWARNING: Using in-memory storage with parallel trials")
+            print("For better reliability, consider using persistent storage:")
+            storage_path = os.path.join(args.output_dir, "optuna.db")
+            print(f"  --storage sqlite:///{storage_path}")
+            print()
+
         study = optuna.create_study(
             study_name=args.study_name,
             direction='maximize'
