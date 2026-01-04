@@ -142,25 +142,42 @@ def parse_args():
 
 
 def create_subset(train_data_path, subset_size, output_path, seed=42):
-    """Create a random subset of training data for faster optimization."""
+    """Create a random subset of training data using reservoir sampling.
+
+    This method is memory-efficient and works with files of any size,
+    only keeping subset_size lines in memory at once.
+    """
     if subset_size <= 0:
         # Use all data
         return train_data_path
 
-    with open(train_data_path, 'r') as f:
-        lines = f.readlines()
+    random.seed(seed)
 
-    if len(lines) <= subset_size:
-        # Dataset is already smaller than subset_size
+    # Use reservoir sampling for memory efficiency
+    # This allows us to sample from arbitrarily large files
+    reservoir = []
+
+    with open(train_data_path, 'r') as f:
+        # Fill reservoir with first subset_size lines
+        for i, line in enumerate(f):
+            if i < subset_size:
+                reservoir.append(line)
+            else:
+                # Randomly replace elements with decreasing probability
+                j = random.randint(0, i)
+                if j < subset_size:
+                    reservoir[j] = line
+
+    # Check if we actually needed to sample
+    if len(reservoir) < subset_size:
+        print(f"Dataset has only {len(reservoir)} molecules, using all of them")
         return train_data_path
 
-    # Randomly sample subset_size lines
-    random.seed(seed)
-    subset = random.sample(lines, subset_size)
-
+    # Write sampled subset to file
     with open(output_path, 'w') as f:
-        f.writelines(subset)
+        f.writelines(reservoir)
 
+    print(f"Sampled {len(reservoir)} molecules from dataset")
     return output_path
 
 
