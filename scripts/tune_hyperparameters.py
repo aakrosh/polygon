@@ -17,6 +17,28 @@ from pathlib import Path
 
 import optuna
 import pandas as pd
+import torch
+
+
+def get_available_devices(n_jobs):
+    """Get list of available devices for parallel trials.
+
+    Returns a list of device strings (e.g., ['cuda:0', 'cuda:1', 'cpu']).
+    """
+    if not torch.cuda.is_available():
+        return ['cpu'] * n_jobs
+
+    n_gpus = torch.cuda.device_count()
+    if n_gpus == 0:
+        return ['cpu'] * n_jobs
+
+    # Distribute trials across available GPUs
+    devices = []
+    for i in range(n_jobs):
+        gpu_id = i % n_gpus
+        devices.append(f'cuda:{gpu_id}')
+
+    return devices
 
 
 def parse_args():
@@ -115,7 +137,13 @@ def parse_args():
         "--device",
         type=str,
         default="cuda:0",
-        help="Device to use for training"
+        help="Device to use for single-GPU training (ignored if --n_jobs > 1)"
+    )
+    parser.add_argument(
+        "--n_jobs",
+        type=int,
+        default=1,
+        help="Number of parallel trials (each uses a different GPU if available)"
     )
 
     # Other training parameters
@@ -226,8 +254,12 @@ def assess_model(model_path, train_data, n_samples, device):
             os.remove(output_json)
 
 
-def objective(trial, args, train_data_subset):
+def objective(trial, args, train_data_subset, device=None):
     """Optuna objective function."""
+
+    # Use provided device or fall back to args.device
+    if device is None:
+        device = args.device
 
     # Suggest hyperparameters
     delta_target = trial.suggest_float('delta_target', args.delta_min, args.delta_max, log=True)
@@ -254,7 +286,7 @@ def objective(trial, args, train_data_subset):
         "--model_save", model_path,
         "--log_file", log_file,
         "--save_frequency", str(args.n_epoch),  # Only save final model
-        "--device", args.device,
+        "--device", device,
     ]
 
     if smiles_augmentation:
@@ -273,7 +305,7 @@ def objective(trial, args, train_data_subset):
             raise optuna.exceptions.TrialPruned()
 
         # Assess the model
-        metrics = assess_model(model_path, train_data_subset, args.n_samples, args.device)
+        metrics = assess_model(model_path, train_data_subset, args.n_samples, device)
 
         if metrics is None:
             raise optuna.exceptions.TrialPruned()
@@ -344,8 +376,34 @@ def main():
             direction='maximize'
         )
 
-    print(f"\n{'='*60}")
-    print(f"Starting Optuna optimization")
+    # Set up device allocation for parallel trials
+    if args.n_jobs > 1:
+        devices = get_available_devices(args.n_jobs)
+        n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+
+        print(f"\n{'='*60}")
+        print(f"Multi-GPU parallel optimization")
+        print(f"Number of parallel workers: {args.n_jobs}")
+        print(f"Available GPUs: {n_gpus}")
+        print(f"Device assignment: {devices}")
+        print(f"{'='*60}\n")
+
+        # Create a device selector based on trial number
+        def get_device_for_trial(trial):
+            return devices[trial.number % len(devices)]
+
+        def objective_with_device(trial):
+            device = get_device_for_trial(trial)
+            return objective(trial, args, train_data_subset, device=device)
+
+        optimization_func = objective_with_device
+    else:
+        print(f"\n{'='*60}")
+        print(f"Single-device optimization")
+        print(f"Device: {args.device}")
+        print(f"{'='*60}\n")
+        optimization_func = lambda trial: objective(trial, args, train_data_subset)
+
     print(f"Study name: {args.study_name}")
     print(f"Number of trials: {args.n_trials}")
     print(f"Training epochs per trial: {args.n_epoch}")
@@ -353,8 +411,9 @@ def main():
 
     # Run optimization
     study.optimize(
-        lambda trial: objective(trial, args, train_data_subset),
+        optimization_func,
         n_trials=args.n_trials,
+        n_jobs=args.n_jobs,
         show_progress_bar=True
     )
 
