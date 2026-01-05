@@ -14,7 +14,16 @@ from pathlib import Path
 import logging
 
 def train_ligand_binding_model(target_unit_pro_id,binding_db_path,output_path):
-    binddb = pd.read_csv(binding_db_path, sep="\t",header=0,low_memory=False,on_bad_lines='skip')
+    # Only read the 4 columns we actually use (4 out of 517 total columns)
+    # This significantly reduces memory usage for large BindingDB files
+    required_columns = [
+        'UniProt (SwissProt) Primary ID of Target Chain',
+        'Ligand SMILES',
+        'IC50 (nM)',
+        'Kd (nM)'
+    ]
+    binddb = pd.read_csv(binding_db_path, sep="\t", header=0, low_memory=False,
+                        on_bad_lines='skip', usecols=required_columns)
 
 
     d = binddb[binddb['UniProt (SwissProt) Primary ID of Target Chain']==target_unit_pro_id]
