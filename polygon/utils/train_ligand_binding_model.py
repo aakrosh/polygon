@@ -14,32 +14,31 @@ from pathlib import Path
 import logging
 
 def train_ligand_binding_model(target_unit_pro_id,binding_db_path,output_path):
-    # Only read required columns (reduces memory usage significantly)
-    # Read binding data columns + all UniProt ID columns (to handle multichain complexes)
-    def select_columns(col):
-        return col in ['Ligand SMILES', 'IC50 (nM)', 'Kd (nM)'] or \
-               'Primary ID of Target Chain' in col
+    # Only read required columns
+    # BindingDB has UniProt IDs for up to 50 target chains
+    columns_needed = ['Ligand SMILES', 'IC50 (nM)', 'Kd (nM)']
+    
+    # Add UniProt columns for all possible chains (typically 1-10 are used)
+    for i in range(1, 51):
+        columns_needed.append(f'UniProt (SwissProt) Primary ID of Target Chain {i}')
 
-    binddb = pd.read_csv(binding_db_path, sep="\t", header=0, low_memory=False,
-                        on_bad_lines='skip', usecols=select_columns)
+    logging.info(f"Loading BindingDB data (only required columns)...")
+    binddb = pd.read_csv(
+        binding_db_path,
+        sep="\t",
+        header=0,
+        usecols=lambda x: x in columns_needed,  # Use lambda to avoid errors if some columns don't exist
+        low_memory=False,
+        on_bad_lines='skip'
+    )
 
-    # Find all UniProt Primary ID columns (both SwissProt and TrEMBL for all chains)
-    uniprot_cols = [col for col in binddb.columns if 'Primary ID of Target Chain' in col]
+    # Find rows where the target UniProt ID appears in ANY chain column
+    uniprot_cols = [col for col in binddb.columns if 'UniProt (SwissProt) Primary ID of Target Chain' in col]
+    mask = binddb[uniprot_cols].apply(lambda row: target_unit_pro_id in row.values, axis=1)
 
-    if len(uniprot_cols) == 0:
-        logging.error("No UniProt Primary ID columns found in BindingDB file")
-        return 1
-
-    # FIXED: Vectorized filtering (100-1000x faster than apply with lambda)
-    mask = (binddb[uniprot_cols] == target_unit_pro_id).any(axis=1)
     d = binddb[mask]
-
-    if d.shape[0] == 0:
-        logging.warning(f'No entries found for target {target_unit_pro_id}')
-        return 1
-
-    d = d[['Ligand SMILES','IC50 (nM)','Kd (nM)']].copy()
-    d.columns = ['smiles','ic50','kd']
+    d = d[['Ligand SMILES','IC50 (nM)','Kd (nM)']]
+    d.columns = ['smiles','ic50','kd50']
 
     logging.debug(f'Number of obs: {d.shape[0]}:')
     logging.debug(f'{d.head()}')
