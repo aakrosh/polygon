@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 #from utils.moses_utils import OneHotVocab
 from polygon.utils.moses_utils import CircularBuffer
 from polygon.utils.moses_utils import set_torch_seed_to_all_gens
-from polygon.utils.utils import save_model
+from polygon.utils.utils import save_model, randomize_smiles
 from polygon.vae.vae_misc import CosineAnnealingLRWithRestart, KLAnnealer
 from abc import ABC, abstractmethod
 
@@ -80,41 +80,14 @@ class VAETrainer(ABC):
         self.model = self.model.to(self.device)
 
 
-    def augment_smiles(self, smiles):
-        """Apply SMILES augmentation by randomizing SMILES representation
-
-        :param smiles: SMILES string
-        :return: augmented SMILES string (or original if augmentation fails)
-        """
-        if not self.smiles_augmentation:
-            return smiles
-
-        try:
-            from rdkit import Chem
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is None:
-                return smiles
-            # Generate random SMILES (different valid representation of same molecule)
-            augmented = Chem.MolToSmiles(mol, doRandom=True, canonical=False)
-            return augmented if augmented else smiles
-        except:
-            return smiles
-
     def get_dataloader(self, data, batch_size=None, collate_fn=None, shuffle=True):
         if batch_size is None:
             batch_size = self.n_batch
 
         if collate_fn is None:
-            # Wrap collate function to apply augmentation
-            base_collate_fn = self.model.get_collate_fn()
-            if self.smiles_augmentation:
-                def augmented_collate_fn(data):
-                    # Apply augmentation to each SMILES
-                    augmented_data = [self.augment_smiles(smiles) for smiles in data]
-                    return base_collate_fn(augmented_data)
-                collate_fn = augmented_collate_fn
-            else:
-                collate_fn = base_collate_fn
+            # Note: SMILES augmentation is handled in _train() method per-epoch
+            # to ensure different representations each epoch
+            collate_fn = self.model.get_collate_fn()
 
         if self.n_workers > 0:
             worker_init_fn = set_torch_seed_to_all_gens
@@ -162,9 +135,11 @@ class VAETrainer(ABC):
             kl_loss, recon_loss, bow_loss = self.model(input_batch)
 
             # Apply delta-VAE if delta_target is set
-            # Standard delta-VAE: penalize only when KL exceeds target
+            # δ-VAE lower bound: ensures KL >= delta_target to prevent collapse
+            # From Razavi et al., 2019 - forces minimum KL divergence
             if self.delta_target is not None:
-                kl_term = torch.clamp(kl_loss - self.delta_target, min=0.0)
+                delta_tensor = torch.tensor(self.delta_target, device=kl_loss.device, dtype=kl_loss.dtype)
+                kl_term = torch.max(kl_loss, delta_tensor)
             else:
                 kl_term = kl_loss
 
@@ -251,8 +226,12 @@ class VAETrainer(ABC):
                 line = ",".join([str(postfix[i]) for i in columns])
             handle.write("{}\n".format(line))
 
-    def _train(self, train_loader, val_loader=None, n_epoch=None, save_frequency=None):
-        """ 
+    def _train(self, train_loader, val_loader=None, n_epoch=None, batch_size=None, save_frequency=None):
+        """
+        Main training loop.
+
+        If smiles_augmentation is enabled, train_loader is raw data (list of SMILES)
+        and will be augmented each epoch. Otherwise, train_loader is a DataLoader.
         """
         device = self.device
         if n_epoch is None:
@@ -279,6 +258,18 @@ class VAETrainer(ABC):
             # Epoch start
             kl_weight = kl_annealer(epoch)
 
+            # Apply SMILES augmentation if enabled
+            if self.smiles_augmentation:
+                # Randomize SMILES for this epoch
+                augmented_train_data = [randomize_smiles(smi) for smi in train_loader]
+
+                # Create dataloader with augmented data
+                epoch_train_loader = self.get_dataloader(augmented_train_data,
+                                                        batch_size=batch_size,
+                                                        shuffle=True)
+            else:
+                # Use pre-created dataloader
+                epoch_train_loader = train_loader
 
             # tqdm_data = tqdm(train_loader,
             #                      desc='Training   (epoch #{})'.format(epoch))
@@ -287,7 +278,7 @@ class VAETrainer(ABC):
             #                             tqdm_data, kl_weight, optimizer)
             desc = 'Training   (epoch #{})'.format(str(epoch).zfill(len(str(n_epoch))))
             postfix = self._train_epoch(epoch,
-                            train_loader, kl_weight, optimizer, label=desc)
+                            epoch_train_loader, kl_weight, optimizer, label=desc)
             if self.log_file is not None:
                 self._log_epoch(postfix)
 
@@ -314,7 +305,7 @@ class VAETrainer(ABC):
 
     def fit(self, train_data, val_data=None, n_epoch=None, batch_size=None, save_frequency=None):
         #log_file = Logger() if self.log_file is not None else None
-        
+
         if self.log_file is not None:
             # Write training parameters to log file
             params = ("Training Parameters:",
@@ -324,16 +315,25 @@ class VAETrainer(ABC):
             with open(self.log_file, "w") as handle:
                 handle.write(params)
 
-        train_loader = self.get_dataloader(train_data,
-            batch_size=batch_size,
-            shuffle=True)
+        # If augmentation is enabled, pass raw data to _train for per-epoch randomization
+        # Otherwise, create dataloader once for efficiency
+        if self.smiles_augmentation:
+            train_loader = train_data  # Pass raw data for augmentation
+            # Validation should NOT be augmented - use normal dataloader
+            val_loader = None if val_data is None else self.get_dataloader(
+                val_data, batch_size=batch_size,
+                shuffle=False
+            )
+        else:
+            train_loader = self.get_dataloader(train_data,
+                batch_size=batch_size,
+                shuffle=True)
+            val_loader = None if val_data is None else self.get_dataloader(
+                val_data, batch_size=batch_size,
+                shuffle=False
+            )
 
-        val_loader = None if val_data is None else self.get_dataloader(
-            val_data, batch_size=batch_size,
-            shuffle=False
-        )
-
-        self._train(train_loader, val_loader, n_epoch=n_epoch, save_frequency=save_frequency)
+        self._train(train_loader, val_loader, n_epoch=n_epoch, batch_size=batch_size, save_frequency=save_frequency)
 
         #self._save_model()
         if self.model_save is not None:

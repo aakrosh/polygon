@@ -404,6 +404,43 @@ def smiles_to_mol(smiles):
         pass
     return None
 
+def randomize_smiles(smiles):
+    """
+    Randomize SMILES representation while preserving molecular structure.
+
+    SMILES augmentation generates different valid SMILES strings for the same molecule
+    by randomizing the atom traversal order. This acts as data augmentation, helping
+    the model learn invariance to SMILES representation.
+
+    Args:
+        smiles (str): Input SMILES string
+
+    Returns:
+        str: Randomized SMILES string, or original if randomization fails
+
+    Example:
+        >>> randomize_smiles('CC(C)Cc1ccc(cc1)C(C)C(=O)O')
+        # Might return: 'O=C(C(C)c1ccc(CC(C)C)cc1)O' or other valid orderings
+    """
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            logging.debug(f"Failed to parse SMILES for augmentation: {smiles}")
+            return smiles
+
+        # Generate randomized SMILES
+        # doRandom=True randomizes atom ordering
+        # canonical=False allows different representations
+        randomized = Chem.MolToSmiles(mol, doRandom=True, canonical=False)
+
+        # Return randomized SMILES (RDKit always returns valid SMILES)
+        return randomized if randomized else smiles
+
+    except (ValueError, RuntimeError) as e:
+        # If anything fails, return original SMILES
+        logging.debug(f"SMILES randomization failed for {smiles}: {e}")
+        return smiles
+
 def balanced_parentheses(input_string):
     s = []
     balanced = True
