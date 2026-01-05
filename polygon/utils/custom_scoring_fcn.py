@@ -416,7 +416,8 @@ class SAScorer(MoleculewiseScoringFunction):
             nf += v
             sfp = bitId
             score1 += self.fscores.get(sfp, -4) * v
-        score1 /= nf
+        if nf > 0:
+            score1 /= nf
         # features score
         nAtoms = m.GetNumAtoms()
         nChiralCenters = len(Chem.FindMolChiralCenters(m, includeUnassigned=True))
