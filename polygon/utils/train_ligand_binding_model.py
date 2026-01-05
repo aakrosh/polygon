@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, rdMolDescriptors, rdFingerprintGenerator
 
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
