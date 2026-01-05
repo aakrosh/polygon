@@ -14,10 +14,10 @@ from pathlib import Path
 import logging
 
 def train_ligand_binding_model(target_unit_pro_id,binding_db_path,output_path):
-    # Only read required columns
+    # Only read the columns we need to reduce memory usage
     # BindingDB has UniProt IDs for up to 50 target chains
     columns_needed = ['Ligand SMILES', 'IC50 (nM)', 'Kd (nM)']
-    
+
     # Add UniProt columns for all possible chains (typically 1-10 are used)
     for i in range(1, 51):
         columns_needed.append(f'UniProt (SwissProt) Primary ID of Target Chain {i}')
@@ -43,24 +43,44 @@ def train_ligand_binding_model(target_unit_pro_id,binding_db_path,output_path):
     logging.debug(f'Number of obs: {d.shape[0]}:')
     logging.debug(f'{d.head()}')
 
-    # FIXED: Vectorized value parsing (handles NaN, empty strings, inequality operators)
-    # Clean IC50 column
-    d['ic50_str'] = d['ic50'].astype(str).str.strip().str.lstrip('<>=~')
-    d['ic50_val'] = pd.to_numeric(d['ic50_str'], errors='coerce')
+    vs = []
+    for i,j in d[['ic50','kd50']].values:
+        # Parse IC50 value
+        try:
+            v = float(i)
+        except (ValueError, TypeError):
+            # Handle values like '>10000' or '<0.5' by stripping first character
+            try:
+                v = float(str(i)[1:])
+            except (ValueError, TypeError):
+                v = np.nan
 
-    # Clean Kd column
-    d['kd_str'] = d['kd'].astype(str).str.strip().str.lstrip('<>=~')
-    d['kd_val'] = pd.to_numeric(d['kd_str'], errors='coerce')
+        # Parse Kd value
+        try:
+            w = float(j)
+        except (ValueError, TypeError):
+            # Handle values like '>10000' or '<0.5' by stripping first character
+            try:
+                w = float(str(j)[1:])
+            except (ValueError, TypeError):
+                w = np.nan
 
-    # FIXED: Prioritize Kd over IC50 (Kd is direct binding measurement, IC50 is functional)
-    d['metric_value'] = d['kd_val'].fillna(d['ic50_val'])
+        # Get minimum of IC50 and Kd
+        t = pd.Series([v,w]).dropna().min()
 
-    # Convert to pKd/pIC50 and remove invalid values
-    d = d[d['metric_value'] > 0]
-    d['metric_value'] = -np.log10(d['metric_value'] * 1E-9)
+        # Only convert to -log10 if value is valid (not NaN, not 0, positive)
+        if pd.notna(t) and t > 0:
+            t = -np.log10(t*1E-9)
+            vs.append(t)
+        else:
+            # Skip invalid values (will be filtered out later)
+            vs.append(np.nan)
 
-    d = d[['smiles','metric_value']].dropna()
+    d['metric_value'] = vs
+    d = d[['smiles','metric_value']]
+    d['metric_value'] = d['metric_value'].astype(float)
     d = d.drop_duplicates(subset='smiles')
+    d = d.dropna()
 
     logging.debug(f'Number of obs: {d.shape[0]}:')
 
@@ -70,38 +90,44 @@ def train_ligand_binding_model(target_unit_pro_id,binding_db_path,output_path):
     # convert to fingerprint
     fps = []
     values = []
-    skipped = 0
+    invalid_smiles_count = 0
     for x,y in d[['smiles','metric_value']].values:
         try:
             mol = Chem.MolFromSmiles(x)
             if mol is None:
-                logging.debug(f'Invalid SMILES skipped: {x}')
-                skipped += 1
+                invalid_smiles_count += 1
                 continue
-            fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2)
+            fp = rdFingerprintGenerator.GetMorganGenerator(2).GetFingerprint(mol)
         except Exception as e:
-            logging.debug(f'Failed to generate fingerprint for {x}: {e}')
-            skipped += 1
+            invalid_smiles_count += 1
+            logging.debug(f"Failed to generate fingerprint for SMILES '{x}': {e}")
             continue
 
         fps.append(fp)
         values.append(y)
 
-    logging.info(f'Valid fingerprints: {len(fps)}, Invalid SMILES skipped: {skipped}')
-
-    if len(fps) < 10:
-        logging.warning('Less than 10 valid SMILES after fingerprinting')
-        return 1
+    if invalid_smiles_count > 0:
+        logging.info(f"Skipped {invalid_smiles_count} molecules with invalid SMILES or fingerprint generation failures")
 
     X = np.array(fps)
     y = np.array(values)
 
-    logging.info(f'Training Random Forest on {len(y)} samples')
+    logging.info(f"Training ligand binding model with {len(X)} valid compound-target pairs")
+
+    if len(X) < 10:
+        logging.info('Less than 10 valid compound-target pairs after filtering. Not fitting a model')
+        return 1
+
+    # Final check: ensure no infinity or NaN values in y
+    if not np.all(np.isfinite(y)):
+        logging.error(f"Target values contain {np.sum(~np.isfinite(y))} non-finite values. Cannot train model.")
+        return 1
+
     regr = RandomForestRegressor(n_estimators=1000,random_state=0,n_jobs=-1)
     regr.fit(X,y)
+    regr.score(X,y)
 
-    score = regr.score(X,y)
-    logging.info(f'Training R² score: {score:.3f}')
+    logging.debug(regr.score(X,y))
 
     if output_path is None:
         output_path = f'{target_unit_pro_id}_rfr_ligand_model.pt'
