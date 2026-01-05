@@ -14,10 +14,21 @@ from pathlib import Path
 import logging
 
 def train_ligand_binding_model(target_unit_pro_id,binding_db_path,output_path):
-    binddb = pd.read_csv(binding_db_path, sep="\t",header=0,low_memory=False,on_bad_lines='skip')
+    # Only read required columns (reduces memory usage significantly)
+    # Read binding data columns + all UniProt ID columns (to handle multichain complexes)
+    def select_columns(col):
+        return col in ['Ligand SMILES', 'IC50 (nM)', 'Kd (nM)'] or \
+               'Primary ID of Target Chain' in col
 
+    binddb = pd.read_csv(binding_db_path, sep="\t", header=0, low_memory=False,
+                        on_bad_lines='skip', usecols=select_columns)
 
-    d = binddb[binddb['UniProt (SwissProt) Primary ID of Target Chain']==target_unit_pro_id]
+    # Find all UniProt Primary ID columns (both SwissProt and TrEMBL for all chains)
+    uniprot_cols = [col for col in binddb.columns if 'Primary ID of Target Chain' in col]
+
+    # Filter rows where target_unit_pro_id appears in ANY UniProt column
+    mask = binddb[uniprot_cols].apply(lambda row: target_unit_pro_id in row.values, axis=1)
+    d = binddb[mask]
     d = d[['Ligand SMILES','IC50 (nM)','Kd (nM)']]
     d.columns = ['smiles','ic50','kd50']
 
