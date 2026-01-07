@@ -242,7 +242,7 @@ def assess_model(model_path, train_data, n_samples, device):
             "--n_samples", str(n_samples),
             "--device", device,
             "--output_json", output_json
-        ], capture_output=True, text=True, timeout=600)
+        ], capture_output=True, text=True)
 
         if result.returncode != 0:
             print(f"Assessment failed: {result.stderr}")
@@ -311,7 +311,7 @@ def objective(trial, args, train_data_subset, device=None):
     print(f"{'='*60}")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
             # Categorize error type for better debugging
