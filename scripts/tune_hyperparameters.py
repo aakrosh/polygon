@@ -298,6 +298,9 @@ def objective(trial, args, train_data_subset, device=None):
         "--lambda_bow", str(lambda_bow),
         "--model_save", model_path,
         "--log_file", log_file,
+        "--kl_start 0",
+        "--kl_w_start 0.0",
+        "--kl_w_end 0.0",
         "--save_frequency", str(args.n_epoch),  # Only save final model
         "--device", device,
     ]
