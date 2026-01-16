@@ -345,6 +345,12 @@ def train_parser(parser):
     train_arg.add_argument('--n_workers',
                            type=int, default=0,
                            help='Number of workers for DataLoaders')
+    train_arg.add_argument('--delta',
+                           type=float, default=0.0,
+                           help='Delta for δ-VAE rate constraint (0.0=disabled, 5-20 recommended)')
+    train_arg.add_argument('--bow_weight',
+                           type=float, default=0.0,
+                           help='Bag-of-Words auxiliary loss weight (0.0=disabled, 0.1-1.0 recommended)')
 
 
     model_arg = sub_parser.add_argument_group('Model Arguments')

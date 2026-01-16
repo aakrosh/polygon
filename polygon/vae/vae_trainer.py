@@ -114,6 +114,7 @@ class VAETrainer(ABC):
 
         kl_loss_values = CircularBuffer(n_batches)
         recon_loss_values =  CircularBuffer(n_batches)
+        bow_loss_values = CircularBuffer(n_batches)
         loss_values =  CircularBuffer(n_batches)
 
 
@@ -124,9 +125,9 @@ class VAETrainer(ABC):
             #input_batch.to(self.device)
             #input_batch = tuple(data.to(self.model.device) for data in input_batch)
             # Forward
-            kl_loss, recon_loss = self.model(input_batch)
+            kl_loss, recon_loss, bow_loss = self.model(input_batch)
 
-            loss = kl_weight * kl_loss + recon_loss
+            loss = kl_weight * kl_loss + recon_loss + self.model.bow_weight * bow_loss
 
             # Backward
             if optimizer is not None:
@@ -141,6 +142,7 @@ class VAETrainer(ABC):
 
             kl_loss_values.add(kl_loss.item())
             recon_loss_values.add(recon_loss.item())
+            bow_loss_values.add(bow_loss.item())
             loss_values.add(loss.item())
 
             lr = (optimizer.param_groups[0]['lr']
@@ -155,7 +157,8 @@ class VAETrainer(ABC):
                        f'Time={elapsed_time:.2f}',
                        f'loss={loss.sum():.5f}',
                        f'(kl={kl_loss.sum():.5f}',
-                       f'recon={recon_loss.sum():.5f})',
+                       f'recon={recon_loss.sum():.5f}',
+                       f'bow={bow_loss.sum():.5f})',
                        f'klw={kl_weight:.5f}',
                        f'lr={lr:.5f}']
 
@@ -166,13 +169,15 @@ class VAETrainer(ABC):
         elapsed_time = time.process_time() - epoch_start_time
         kl_loss_value = kl_loss_values.mean()
         recon_loss_value = recon_loss_values.mean()
+        bow_loss_value = bow_loss_values.mean()
         loss_value = loss_values.mean()
         postfix = [f'{label}',
                    #f'Batch {str(i).zfill(len(str(n_batches)))}/{n_batches}',
                    f'Time={elapsed_time:.2f}',
                    f'loss={loss_value:.5f}',
                    f'(kl={kl_loss_value:.5f}',
-                   f'recon={recon_loss_value:.5f})',
+                   f'recon={recon_loss_value:.5f}',
+                   f'bow={bow_loss_value:.5f})',
                    f'klw={kl_weight:.5f}',
                    f'lr={lr:.5f}']
         logging.info(' '.join([str(i) for i in postfix]))
@@ -183,6 +188,7 @@ class VAETrainer(ABC):
             'lr': lr,
             'kl_loss': kl_loss_value,
             'recon_loss': recon_loss_value,
+            'bow_loss': bow_loss_value,
             'loss': loss_value,
             'mode': 'Eval' if optimizer is None else 'Train'}
 
@@ -191,11 +197,11 @@ class VAETrainer(ABC):
     def _log_epoch(self, postfix, header=False):
         """ Write one epoch training results to log file
         """
-        columns = ['epoch','kl_weight','lr','kl_loss','recon_loss','loss','mode']
+        columns = ['epoch','kl_weight','lr','kl_loss','recon_loss','bow_loss','loss','mode']
 
 
         if self.log_file is None:
-            return 
+            return
         with open(self.log_file, "a+") as handle:
             if header:
                 line = ",".join(columns)

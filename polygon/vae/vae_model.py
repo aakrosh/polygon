@@ -36,6 +36,8 @@ class VAE(nn.Module):
         self.d_d_h = 512
         self.freeze_embeddings = False
         self.vocabulary=None
+        self.delta = 0.0  # Delta for δ-VAE (rate constraint)
+        self.bow_weight = 0.0  # Bag-of-Words auxiliary loss weight
 
         # overwrite defaults with passed parameters
         self.__dict__.update(kwargs)
@@ -44,6 +46,8 @@ class VAE(nn.Module):
         if self.vocabulary is None:
             self.vocabulary = get_vocabulary()
 
+        # Create SmilesCharDictionary instance once for encoding/decoding
+        self._smiles_char_dict = SmilesCharDictionary()
 
         # Special symbols
         for ss in ('bos', 'eos', 'unk', 'pad'):
@@ -97,6 +101,10 @@ class VAE(nn.Module):
         self.decoder_lat = nn.Linear(self.d_z, self.d_d_h)
         self.decoder_fc = nn.Linear(self.d_d_h, n_vocab)
 
+        # Bag-of-Words prediction layer (only if BoW is enabled)
+        if self.bow_weight > 0:
+            self.bow_fc = nn.Linear(self.d_z, n_vocab)
+
         # Grouping the model's parameters
         self.encoder = nn.ModuleList([
             self.encoder_rnn,
@@ -120,7 +128,11 @@ class VAE(nn.Module):
         return next(self.parameters()).device
 
     def string2tensor(self, string, device='model'):
-        ids = self.vocabulary.string2ids(string, add_bos=True, add_eos=True)
+        # CRITICAL FIX: Encode multi-character tokens (Br→Y, Cl→X, etc.) BEFORE tokenization
+        # This prevents 'r' and 'l' from being mapped to <unk> tokens
+        encoded_string = self._smiles_char_dict.encode(string)
+
+        ids = self.vocabulary.string2ids(encoded_string, add_bos=True, add_eos=True)
         tensor = torch.tensor(
             ids, dtype=torch.long,
             device=self.device if device == 'model' else device
@@ -130,7 +142,11 @@ class VAE(nn.Module):
 
     def tensor2string(self, tensor):
         ids = tensor.tolist()
-        string = self.vocabulary.ids2string(ids, rem_bos=True, rem_eos=True)
+        encoded_string = self.vocabulary.ids2string(ids, rem_bos=True, rem_eos=True)
+
+        # CRITICAL FIX: Decode encoded tokens (Y→Br, X→Cl, etc.) back to original SMILES
+        string = self._smiles_char_dict.decode(encoded_string)
+
         return string
 
     def get_collate_device(self):
@@ -154,6 +170,7 @@ class VAE(nn.Module):
         :param x: list of tensors of longs, input sentence x
         :return: float, kl term component of loss
         :return: float, recon component of loss
+        :return: float, bow (bag-of-words) auxiliary loss
         """
 
         # Encoder: x -> z, kl_loss
@@ -161,9 +178,14 @@ class VAE(nn.Module):
 
         # Decoder: x, z -> recon_loss
         recon_loss = self.forward_decoder(x, z)
-        
 
-        return kl_loss, recon_loss
+        # Bag-of-Words auxiliary loss (if enabled)
+        if self.bow_weight > 0:
+            bow_loss = self.forward_bow(x, z)
+        else:
+            bow_loss = torch.tensor(0.0, device=z.device)
+
+        return kl_loss, recon_loss, bow_loss
 
     def encode(self, x):
         """   
@@ -222,7 +244,7 @@ class VAE(nn.Module):
         """
 
         x = [self.x_emb(i_x) for i_x in x]
-        x = nn.utils.rnn.pack_sequence(x)
+        x = nn.utils.rnn.pack_sequence(x, enforce_sorted=False)
 
         _, h = self.encoder_rnn(x, None)
 
@@ -233,7 +255,17 @@ class VAE(nn.Module):
         eps = torch.randn_like(mu)
         z = mu + (logvar / 2).exp() * eps
 
-        kl_loss = 0.5 * (logvar.exp() + mu ** 2 - 1 - logvar).sum(1).mean()
+        # Compute raw KL divergence
+        total_kl = 0.5 * (logvar.exp() + mu ** 2 - 1 - logvar).sum(1).mean()
+
+        # Apply δ-VAE constraint if delta > 0
+        # This ensures KL >= delta, preventing posterior collapse
+        if self.delta > 0:
+            delta_tensor = torch.tensor(self.delta, device=total_kl.device, dtype=total_kl.dtype)
+            kl_loss = torch.max(total_kl, delta_tensor)
+        else:
+            kl_loss = total_kl
+
         if return_mu:
              return z, kl_loss, mu
         return z, kl_loss
@@ -255,10 +287,15 @@ class VAE(nn.Module):
         z_0 = z.unsqueeze(1).repeat(1, x_emb.size(1), 1)
         x_input = torch.cat([x_emb, z_0], dim=-1)
         x_input = nn.utils.rnn.pack_padded_sequence(x_input, lengths,
-                                                    batch_first=True)
+                                                    batch_first=True,
+                                                    enforce_sorted=False)
 
-        h_0 = self.decoder_lat(z)
-        h_0 = h_0.unsqueeze(0).repeat(self.decoder_rnn.num_layers, 1, 1)
+        # ARCHITECTURAL FIX: Initialize decoder hidden state to zeros instead of from z
+        # This removes the decoder bypass and forces the decoder to use only the
+        # concatenated z at each time step, preventing posterior collapse
+        h_0 = torch.zeros(
+            self.decoder_rnn.num_layers, z.size(0), self.d_d_h, device=z.device
+        )
 
         output, _ = self.decoder_rnn(x_input, h_0)
 
@@ -273,6 +310,46 @@ class VAE(nn.Module):
         if return_y:
             return recon_loss,y
         return recon_loss
+
+    def forward_bow(self, x, z):
+        """Bag-of-Words auxiliary loss
+
+        Predicts which tokens appear in the molecule from latent code z.
+        Forces decoder to use latent information for token content.
+
+        :param x: list of tensors of longs, input sentence x
+        :param z: (n_batch, d_z) of floats, latent vector z
+        :return: float, bow loss component
+        """
+        # Backward compatibility: if bow_fc doesn't exist, return 0
+        if not hasattr(self, 'bow_fc'):
+            return torch.tensor(0.0, device=z.device)
+
+        # Create bag-of-words target: binary vector indicating which tokens appear
+        n_batch = len(x)
+        n_vocab = len(self.vocabulary)
+
+        # Pad sequences for batch processing
+        x_padded = nn.utils.rnn.pad_sequence(x, batch_first=True, padding_value=self.pad)
+
+        # Create bow_target and mark all tokens that appear using scatter
+        bow_target = torch.zeros(n_batch, n_vocab, device=z.device)
+        bow_target.scatter_(1, x_padded, 1.0)  # Mark all tokens in vocabulary
+
+        # Remove special tokens (pad, bos, eos) from the target
+        bow_target[:, self.pad] = 0.0
+        bow_target[:, self.bos] = 0.0
+        bow_target[:, self.eos] = 0.0
+
+        # Predict token presence from latent code
+        bow_logits = self.bow_fc(z)  # (n_batch, n_vocab)
+
+        # Binary cross-entropy loss
+        bow_loss = F.binary_cross_entropy_with_logits(
+            bow_logits, bow_target, reduction='mean'
+        )
+
+        return bow_loss
 
     def sample_z_prior(self, n_batch):
         """Sampling z ~ p(z) = N(0, I)
@@ -313,9 +390,10 @@ class VAE(nn.Module):
             z = z.to(self.device)
             z_0 = z.unsqueeze(1)
 
-            # Initial values
-            h = self.decoder_lat(z)
-            h = h.unsqueeze(0).repeat(self.decoder_rnn.num_layers, 1, 1)
+            # Initial values - use zeros for hidden state (consistent with training)
+            h = torch.zeros(
+                self.decoder_rnn.num_layers, n_batch, self.d_d_h, device=self.device
+            )
             w = torch.tensor(self.bos, device=self.device).repeat(n_batch)
             x = torch.tensor([self.pad], device=self.device).repeat(n_batch,
                                                                     max_len)
@@ -332,6 +410,13 @@ class VAE(nn.Module):
 
                 o, h = self.decoder_rnn(x_input, h)
                 y = self.decoder_fc(o.squeeze(1))
+
+                # Mask out special tokens (UNK, BOS, PAD) to prevent sampling them
+                # Only EOS is allowed as a special token to properly terminate sequences
+                y[:, self.unk] = -float('inf')
+                y[:, self.bos] = -float('inf')
+                y[:, self.pad] = -float('inf')
+
                 y = F.softmax(y / temp, dim=-1)
                 if multinomial:
                     w = torch.multinomial(y, 1)[:, 0]
