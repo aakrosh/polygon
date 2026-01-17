@@ -40,6 +40,11 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.0",
 ]
+viz = [
+    "plotly>=5.0.0",
+    "umap-learn>=0.5.0",
+    "scipy>=1.7.0",
+]
 
 [project.scripts]
 polygon = "polygon.run:main"

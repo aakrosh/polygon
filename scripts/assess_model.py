@@ -13,8 +13,10 @@ This script evaluates:
 import sys
 import argparse
 import random
+import logging
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from rdkit import Chem
 from rdkit.Chem import Descriptors, QED, AllChem
 from rdkit import DataStructs
@@ -31,9 +33,11 @@ except ImportError:
     print("Warning: matplotlib not installed. Property distribution plots will be skipped.")
 
 # Add parent directory to path
-sys.path.insert(0, '..')
-from polygon.vae.vae_model import VAE
-from polygon.utils.utils import load_model
+script_dir = Path(__file__).parent
+project_root = script_dir.parent
+sys.path.insert(0, str(project_root))
+from polygon.utils.model_utils import load_vae_model
+
 
 def is_valid(smiles):
     """Check if SMILES string is valid."""
@@ -335,8 +339,7 @@ def main():
 
     # Load model
     print(f"\nLoading model from {args.model_path}...")
-    model = load_model(VAE, args.model_path, device)
-    model.eval()
+    model = load_vae_model(args.model_path, device)
     print("Model loaded successfully!")
 
     # Generate molecules

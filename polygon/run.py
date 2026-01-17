@@ -351,6 +351,9 @@ def train_parser(parser):
     train_arg.add_argument('--bow_weight',
                            type=float, default=0.0,
                            help='Bag-of-Words auxiliary loss weight (0.0=disabled, 0.1-1.0 recommended)')
+    train_arg.add_argument('--smiles_augmentation',
+                           default=False, action='store_true',
+                           help='Enable SMILES augmentation during training (randomizes atom ordering each epoch)')
 
 
     model_arg = sub_parser.add_argument_group('Model Arguments')
