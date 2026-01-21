@@ -455,11 +455,15 @@ def sample_parser(parser):
         action="store",
         type=int,
         help="Get Diverse Set of n molecules")
+    opt_runtime.add_argument("--constrained",
+        default=False,
+        action="store_true",
+        help="Use constrained sampling to enforce SMILES syntax rules (balanced parentheses, rings)")
 
     # Optional runtime behavior
     global_arguments(sub_parser)
 
-    return sub_parser 
+    return sub_parser
 
 def train_ligand_binding_model_parser(parser):
     """ Add subparser arguments for passing filter generation """
@@ -787,11 +791,15 @@ def sample_main(args):
     model = load_model(VAE, args.model_path, args.device)
     scorers, scoring_function = build_scoring_function(args, return_individual=True)
 
+    # Check if constrained sampling is requested
+    use_constrained = getattr(args, 'constrained', False)
+    if use_constrained:
+        logger.info("Using constrained sampling (SMILES syntax rules enforced)")
 
     c = 0
     passing = []
     while c<args.n_molecules:
-        s = model.sample(1)
+        s = model.sample(1, constrained=use_constrained)
         s = canonicalize_list(s)
         if len(s)==0:
             continue

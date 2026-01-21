@@ -330,6 +330,8 @@ def main():
                        help='Output file for assessment results')
     parser.add_argument('--save_samples', action='store_true',
                        help='Save generated SMILES to file')
+    parser.add_argument('--constrained', action='store_true',
+                       help='Use constrained sampling (enforces SMILES syntax rules)')
 
     args = parser.parse_args()
 
@@ -344,7 +346,9 @@ def main():
 
     # Generate molecules
     print(f"\nGenerating {args.n_samples} molecules...")
-    generated_smiles = model.sample(args.n_samples, max_len=100)
+    if args.constrained:
+        print("Using constrained sampling (SMILES syntax rules enforced)")
+    generated_smiles = model.sample(args.n_samples, max_len=100, constrained=args.constrained)
     print(f"Generated {len(generated_smiles)} SMILES strings")
 
     if args.save_samples:

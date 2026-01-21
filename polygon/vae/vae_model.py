@@ -374,7 +374,7 @@ class VAE(nn.Module):
         else:
             return z
 
-    def sample(self, n_batch, max_len=100, z=None, temp=1.0, multinomial=True):
+    def sample(self, n_batch, max_len=100, z=None, temp=1.0, multinomial=True, constrained=False):
         """Generating n_batch samples in eval mode (`z` could be
         not on same device)
 
@@ -382,8 +382,12 @@ class VAE(nn.Module):
         :param max_len: max len of samples
         :param z: (n_batch, d_z) of floats, latent vector z or None
         :param temp: temperature of softmax
+        :param multinomial: if True use multinomial sampling, else argmax
+        :param constrained: if True, enforce SMILES syntax constraints
         :return: list of tensors of strings, samples sequence x
         """
+        if constrained:
+            return self.sample_constrained(n_batch, max_len=max_len, z=z, temp=temp)
         with torch.no_grad():
             if z is None:
                 z = self.sample_z_prior(n_batch)
@@ -436,6 +440,147 @@ class VAE(nn.Module):
                 eos_mask = eos_mask | i_eos_mask
 
             # Converting `x` to list of tensors
+            new_x = []
+            for i in range(x.size(0)):
+                new_x.append(x[i, :end_pads[i]])
+
+            return [self.tensor2string(i_x) for i_x in new_x]
+
+    def sample_constrained(self, n_batch, max_len=100, z=None, temp=1.0):
+        """Generate samples with SMILES syntax constraints.
+
+        Enforces:
+        - Balanced parentheses
+        - Balanced ring closures (1-9)
+        - Balanced square brackets
+        - Forces closure near end of sequence
+
+        Args:
+            n_batch: number of samples to generate
+            max_len: maximum sequence length
+            z: latent vectors (optional)
+            temp: softmax temperature
+
+        Returns:
+            list of SMILES strings
+        """
+        # Token indices from SmilesCharDictionary
+        OPEN_PAREN = 25   # '('
+        CLOSE_PAREN = 24  # ')'
+        OPEN_BRACKET = 16  # '['
+        CLOSE_BRACKET = 18  # ']'
+        RING_TOKENS = {31: 1, 34: 2, 33: 3, 36: 4, 35: 5, 38: 6, 37: 7, 40: 8, 39: 9, 32: 0}
+        # Reverse: ring number -> token index
+        RING_TO_TOKEN = {v: k for k, v in RING_TOKENS.items()}
+        PERCENT_TOKEN = 22  # '%' for ring closures 10-99 (not tracked, so mask it)
+
+        with torch.no_grad():
+            if z is None:
+                z = self.sample_z_prior(n_batch)
+            z = z.to(self.device)
+            z_0 = z.unsqueeze(1)
+
+            # Initial values
+            h = torch.zeros(
+                self.decoder_rnn.num_layers, n_batch, self.d_d_h, device=self.device
+            )
+            w = torch.tensor(self.bos, device=self.device).repeat(n_batch)
+            x = torch.tensor([self.pad], device=self.device).repeat(n_batch, max_len)
+            x[:, 0] = self.bos
+            end_pads = torch.tensor([max_len], device=self.device).repeat(n_batch)
+            eos_mask = torch.zeros(n_batch, dtype=torch.bool, device=self.device)
+
+            # Tracking state for each sample
+            paren_count = torch.zeros(n_batch, dtype=torch.long, device=self.device)
+            bracket_count = torch.zeros(n_batch, dtype=torch.long, device=self.device)
+            # Track open rings: for each sample, a set of open ring numbers
+            open_rings = [set() for _ in range(n_batch)]
+
+            for i in range(1, max_len):
+                x_emb = self.x_emb(w).unsqueeze(1)
+                x_input = torch.cat([x_emb, z_0], dim=-1)
+
+                o, h = self.decoder_rnn(x_input, h)
+                y = self.decoder_fc(o.squeeze(1))
+
+                # Mask special tokens
+                y[:, self.unk] = -float('inf')
+                y[:, self.bos] = -float('inf')
+                y[:, self.pad] = -float('inf')
+
+                # Apply syntax constraints
+                for b in range(n_batch):
+                    if eos_mask[b]:
+                        continue
+
+                    # Can't close parentheses if none are open
+                    if paren_count[b] == 0:
+                        y[b, CLOSE_PAREN] = -float('inf')
+
+                    # Can't close brackets if none are open
+                    if bracket_count[b] == 0:
+                        y[b, CLOSE_BRACKET] = -float('inf')
+
+                    # Block % token (multi-digit ring closures not tracked)
+                    y[b, PERCENT_TOKEN] = -float('inf')
+
+                    # Near end of sequence: force closing open structures
+                    remaining = max_len - i - 1
+                    open_structures = paren_count[b].item() + bracket_count[b].item() + len(open_rings[b])
+
+                    if remaining <= open_structures + 1:
+                        # Build set of allowed tokens (any closing token + EOS)
+                        allowed_tokens = {self.eos}
+
+                        if paren_count[b] > 0:
+                            allowed_tokens.add(CLOSE_PAREN)
+
+                        if bracket_count[b] > 0:
+                            allowed_tokens.add(CLOSE_BRACKET)
+
+                        # Add all ring-closing tokens for open rings
+                        for ring_num in open_rings[b]:
+                            ring_tok = RING_TO_TOKEN.get(ring_num)
+                            if ring_tok is not None:
+                                allowed_tokens.add(ring_tok)
+
+                        # Mask out all non-allowed tokens (vectorized)
+                        mask = torch.ones(y.size(1), dtype=torch.bool, device=self.device)
+                        mask[list(allowed_tokens)] = False
+                        y[b, mask] = -float('inf')
+
+                # Sample tokens
+                y = F.softmax(y / temp, dim=-1)
+                w = torch.multinomial(y, 1)[:, 0]
+
+                # Update state based on sampled tokens
+                for b in range(n_batch):
+                    if eos_mask[b]:
+                        continue
+
+                    tok = w[b].item()
+
+                    if tok == OPEN_PAREN:
+                        paren_count[b] += 1
+                    elif tok == CLOSE_PAREN:
+                        paren_count[b] = max(0, paren_count[b] - 1)
+                    elif tok == OPEN_BRACKET:
+                        bracket_count[b] += 1
+                    elif tok == CLOSE_BRACKET:
+                        bracket_count[b] = max(0, bracket_count[b] - 1)
+                    elif tok in RING_TOKENS:
+                        ring_num = RING_TOKENS[tok]
+                        if ring_num in open_rings[b]:
+                            open_rings[b].remove(ring_num)  # Close ring
+                        else:
+                            open_rings[b].add(ring_num)  # Open ring
+
+                x[~eos_mask, i] = w[~eos_mask]
+                i_eos_mask = ~eos_mask & (w == self.eos)
+                end_pads[i_eos_mask] = i + 1
+                eos_mask = eos_mask | i_eos_mask
+
+            # Convert to strings
             new_x = []
             for i in range(x.size(0)):
                 new_x.append(x[i, :end_pads[i]])
